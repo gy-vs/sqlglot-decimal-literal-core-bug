@@ -479,6 +479,7 @@ class Token:
         "start",
         "end",
         "comments",
+        "numeric_literal",
     )
     __slots__ = _attrs
 
@@ -511,6 +512,7 @@ class Token:
         start: int = 0,
         end: int = 0,
         comments: list[str] | None = None,
+        numeric_literal: bool = False,
     ) -> None:
         self.token_type = token_type
         self.text = text
@@ -519,6 +521,8 @@ class Token:
         self.start = start
         self.end = end
         self.comments = [] if comments is None else comments
+        # True when this type token was produced by a numeric literal suffix, e.g. DECIMAL in 1.0BD
+        self.numeric_literal = numeric_literal
 
     def __bool__(self) -> bool:
         return self.token_type != TokenType.SENTINEL
@@ -529,6 +533,7 @@ class Token:
             if k == "token_type"
             else f"{k}: {getattr(self, k)}"
             for k in self._attrs
+            if k != "numeric_literal" or self.numeric_literal
         )
         return f"<Token {attributes}>"
 
@@ -761,7 +766,12 @@ class TokenizerCore:
     def _text(self) -> str:
         return self.sql[self._start : self._current]
 
-    def _add(self, token_type: TokenType, text: str | None = None) -> None:
+    def _add(
+        self,
+        token_type: TokenType,
+        text: str | None = None,
+        numeric_literal: bool = False,
+    ) -> None:
         self._prev_token_line = self._line
 
         if self._comments and token_type == TokenType.SEMICOLON and self.tokens:
@@ -780,6 +790,7 @@ class TokenizerCore:
                 start=self._start,
                 end=self._current - 1,
                 comments=self._comments,
+                numeric_literal=numeric_literal,
             )
         )
         self._comments = []
@@ -917,12 +928,37 @@ class TokenizerCore:
 
         return True
 
+    def _peek_matches_numeric_literal(self) -> bool:
+        """
+        Returns whether the identifier directly following the current position (e.g. ``BD`` in
+        ``0BD``) is a registered numeric literal suffix (e.g. Hive's ``BD`` = DECIMAL).
+
+        This ensures that a suffix attached to a leading zero is scanned as a numeric literal
+        instead of being mistaken for a bit/hex string or an identifier alias.
+        """
+        numeric_literals = self.numeric_literals
+        if not numeric_literals:
+            return False
+
+        sql = self.sql
+        size = self.size
+        single_tokens = self.single_tokens
+
+        end = self._current
+        while end < size:
+            char = sql[end]
+            if char.isspace() or char in single_tokens:
+                break
+            end += 1
+
+        return sql[self._current : end].upper() in numeric_literals
+
     def _scan_number(self) -> None:
         if self._char == "0":
             peek = _CHAR_UPPER.get(self._peek, self._peek)
-            if peek == "B":
+            if peek == "B" and not self._peek_matches_numeric_literal():
                 return self._scan_bits() if self.has_bit_strings else self._add(TokenType.NUMBER)
-            elif peek == "X":
+            elif peek == "X" and not self._peek_matches_numeric_literal():
                 return self._scan_hex() if self.has_hex_strings else self._add(TokenType.NUMBER)
 
         decimal = False
@@ -997,7 +1033,7 @@ class TokenizerCore:
         # Normalize inputs such as 123L to 123::BIGINT so that they're parsed as casts
         if numeric_type:
             self._add(TokenType.DCOLON, "::")
-            self._add(numeric_type, numeric_literal)
+            self._add(numeric_type, numeric_literal, numeric_literal=True)
 
     def _scan_bits(self) -> None:
         self._advance()

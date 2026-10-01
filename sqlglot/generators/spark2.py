@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import typing as t
+from decimal import Decimal, InvalidOperation
 
 from sqlglot import exp, transforms
 from sqlglot.dialects.dialect import (
@@ -105,6 +106,59 @@ def temporary_storage_provider(expression: exp.Expr) -> exp.Expr:
     provider = exp.FileFormatProperty(this=exp.Literal.string("parquet"))
     expression.args["properties"].append("expressions", provider)
     return expression
+
+
+def _decimal_literal_sql(self: Spark2Generator, expression: exp.Cast) -> str | None:
+    """
+    Emits a cast of a numeric literal to DECIMAL as a Spark 2 BD-suffixed decimal literal,
+    e.g. CAST(10.50 AS DECIMAL(4, 2)) -> 10.50BD.
+
+    Spark 2's lexer only accepts the BD suffix on plain (non-exponent) decimal literals, so an
+    exponent literal like 1E3 is rendered with its exponent expanded (1000BD); the emitted text
+    round-trips through the Spark 2 parser with the same value, precision and scale.
+    """
+    this = expression.this
+    if not (
+        expression.args.get("numeric_literal")
+        and isinstance(this, exp.Literal)
+        and this.is_number
+    ):
+        return None
+
+    try:
+        value = Decimal(this.name)
+    except (InvalidOperation, ValueError):
+        return None
+
+    if not value.is_finite():
+        return None
+
+    sign, _, exponent = value.as_tuple()
+
+    params = expression.to.expressions
+    try:
+        precision = int(params[0].name)
+        scale = int(params[1].name) if len(params) > 1 else 0
+    except (IndexError, ValueError, TypeError):
+        return None
+
+    # A nonzero literal's exponent directly determines its scale, so a mismatch means the
+    # fixed-point form can't represent it without changing its type. A zero literal's unscaled
+    # value is a single digit regardless of its notation, so any declared scale renders fine.
+    if value != 0 and exponent < 0 and -exponent != scale:
+        return None
+
+    # Render the value as a plain fixed-point number with exactly `scale` fractional digits,
+    # padding with leading zeros so it carries the literal's declared precision (e.g. 1E3 typed
+    # DECIMAL(4, 0) renders as 1000BD so it reparses with the same precision)
+    text = f"{value:.{scale}f}"
+    integer, dot, fraction = text.partition(".")
+    if len(integer) < precision - scale:
+        integer = integer.rjust(precision - scale, "0")
+    text = f"{integer}{dot}{fraction}" if dot else integer
+
+    sign_prefix = "-" if sign and value != 0 else ""
+    return f"{sign_prefix}{text}BD"
 
 
 class Spark2Generator(HiveGenerator):
@@ -231,6 +285,11 @@ class Spark2Generator(HiveGenerator):
 
         if is_parse_json(expression):
             return self.func("TO_JSON", arg)
+
+        if not safe_prefix:
+            decimal_literal = _decimal_literal_sql(self, expression)
+            if decimal_literal is not None:
+                return decimal_literal
 
         return super(HiveGenerator, self).cast_sql(expression, safe_prefix=safe_prefix)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import typing as t
+from decimal import Decimal
 
 from sqlglot import exp, parser
 from sqlglot.dialects.dialect import build_formatted_time, build_regexp_extract
@@ -27,6 +28,47 @@ def _build_to_date(args: list, dialect: Dialect) -> exp.TsOrDsToDate:
     expr = build_formatted_time(exp.TsOrDsToDate)(args, dialect)
     expr.set("safe", True)
     return expr
+
+
+def build_decimal_type(literal: exp.Literal) -> exp.DataType | None:
+    """
+    Builds the DECIMAL(p, s) type of a Hive/Spark numeric literal with a BD suffix
+    (e.g. ``10.50BD`` -> ``DECIMAL(4, 2)``).
+
+    The precision and scale follow the engine's own convention for decimal literals: they are
+    derived from the value's unscaled representation, including exponents (``1E3BD`` is
+    ``DECIMAL(4, 0)``), while trailing zeros remain significant (``10.50`` keeps scale 2).
+    """
+    try:
+        value = Decimal(literal.name)
+    except Exception:
+        return None
+
+    if not value.is_finite():
+        return None
+
+    if value == 0:
+        # A zero literal always has a single unscaled digit, so its type is DECIMAL(1, 0) even
+        # when written with an exponent (e.g. 0E3BD), matching Spark's decimal literal inference
+        precision, scale = 1, 0
+    else:
+        _, digits, exponent = value.as_tuple()
+
+        scale = -exponent
+        if scale < 0:
+            # Values like 1E3 carry a negative exponent; the trailing zeros contribute to precision
+            precision = len(digits) - scale
+            scale = 0
+        else:
+            precision = max(len(digits), scale)
+
+    return exp.DataType(
+        this=exp.DType.DECIMAL,
+        expressions=[
+            exp.DataTypeParam(this=exp.Literal.number(precision)),
+            exp.DataTypeParam(this=exp.Literal.number(scale)),
+        ],
+    )
 
 
 def _build_named_struct(args: list) -> exp.Struct:
@@ -145,6 +187,28 @@ class HiveParser(parser.Parser):
         **parser.Parser.ALTER_PARSERS,
         "CHANGE": lambda self: self._parse_alter_table_change(),
     }
+
+    def build_cast(self, strict: bool, **kwargs) -> exp.Expr:
+        # A numeric literal with a BD suffix, e.g. 10.50BD, is tokenized as 10.50::DECIMAL where
+        # the DECIMAL type token carries the numeric_literal marker. Explicit casts
+        # (CAST(10.50 AS DECIMAL) or 10.50::DECIMAL) don't set it, so their declared type is
+        # left untouched.
+        to = kwargs.get("to")
+        this = kwargs.get("this")
+        if (
+            isinstance(this, exp.Literal)
+            and this.is_number
+            and isinstance(to, exp.DataType)
+            and not to.expressions
+            and to.this == exp.DType.DECIMAL
+            and getattr(self._prev, "numeric_literal", False)
+        ):
+            decimal_type = build_decimal_type(this)
+            if decimal_type is not None:
+                kwargs["to"] = decimal_type
+                kwargs["numeric_literal"] = True
+
+        return super().build_cast(strict, **kwargs)
 
     def _parse_transform(self) -> exp.Transform | exp.QueryTransform | None:
         if not self._match(TokenType.L_PAREN, advance=False):

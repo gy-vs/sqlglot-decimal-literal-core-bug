@@ -40,6 +40,8 @@ class Cast(Expression, Func):
         "safe": False,
         "action": False,
         "default": False,
+        # True when the cast represents a numeric literal suffix, e.g. the BD in 10.50BD
+        "numeric_literal": False,
     }
 
     @property

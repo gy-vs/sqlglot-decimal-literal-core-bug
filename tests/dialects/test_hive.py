@@ -127,12 +127,57 @@ class TestHive(Validator):
         self.validate_all(
             "1.0bd",
             write={
-                "duckdb": "TRY_CAST(1.0 AS DECIMAL)",
-                "presto": "TRY_CAST(1.0 AS DECIMAL)",
-                "hive": "CAST(1.0 AS DECIMAL)",
-                "spark": "CAST(1.0 AS DECIMAL)",
+                "duckdb": "TRY_CAST(1.0 AS DECIMAL(2, 1))",
+                "presto": "TRY_CAST(1.0 AS DECIMAL(2, 1))",
+                "hive": "CAST(1.0 AS DECIMAL(2, 1))",
+                "spark": "1.0BD",
             },
         )
+        # A leading zero followed by BD is a decimal literal, not an aliased projection
+        self.validate_all(
+            "SELECT 0BD",
+            write={
+                "hive": "SELECT CAST(0 AS DECIMAL(1, 0))",
+                "spark": "SELECT 0BD",
+                "spark2": "SELECT 0BD",
+            },
+        )
+        self.validate_all(
+            "0BD",
+            write={
+                "duckdb": "TRY_CAST(0 AS DECIMAL(1, 0))",
+                "presto": "TRY_CAST(0 AS DECIMAL(1, 0))",
+                "hive": "CAST(0 AS DECIMAL(1, 0))",
+                "spark": "0BD",
+                "spark2": "0BD",
+            },
+        )
+        # The literal's precision and scale are derived from its digits, including exponents
+        self.validate_all(
+            "10.50BD",
+            write={
+                "duckdb": "TRY_CAST(10.50 AS DECIMAL(4, 2))",
+                "presto": "TRY_CAST(10.50 AS DECIMAL(4, 2))",
+                "hive": "CAST(10.50 AS DECIMAL(4, 2))",
+                "spark": "10.50BD",
+                "spark2": "10.50BD",
+            },
+        )
+        self.validate_all(
+            "1E3BD",
+            write={
+                "duckdb": "TRY_CAST(1E3 AS DECIMAL(4, 0))",
+                "presto": "TRY_CAST(1E3 AS DECIMAL(4, 0))",
+                "hive": "CAST(1E3 AS DECIMAL(4, 0))",
+                "spark": "1000BD",
+                # Spark 2's lexer doesn't accept exponents on BD literals, so it's expanded
+                "spark2": "1000BD",
+            },
+        )
+        # Explicit casts without precision keep the dialect's default DECIMAL type
+        self.validate_identity("CAST(10.50 AS DECIMAL)")
+        self.validate_identity("SELECT 0 AS BD")
+        self.validate_identity("10.50")
         self.validate_all(
             "CAST(1 AS INT)",
             read={

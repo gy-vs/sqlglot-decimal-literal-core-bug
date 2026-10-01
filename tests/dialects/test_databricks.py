@@ -569,6 +569,17 @@ class TestDatabricks(Validator):
             },
         )
 
+    def test_decimal_literal_suffix(self):
+        self.validate_identity("SELECT 0BD")
+        self.validate_identity("SELECT 10.50BD")
+        self.validate_all(
+            "SELECT 1E3BD",
+            write={
+                "databricks": "SELECT 1000BD",
+                "hive": "SELECT CAST(1E3 AS DECIMAL(4, 0))",
+            },
+        )
+
     def test_declare(self):
         self.validate_identity("DECLARE VAR x INT", "DECLARE x INT")
         self.validate_identity("DECLARE x INT")

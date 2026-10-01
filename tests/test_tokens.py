@@ -1,6 +1,6 @@
 import unittest
 
-from sqlglot.dialects import BigQuery
+from sqlglot.dialects import BigQuery, Hive
 from sqlglot.errors import TokenError
 from sqlglot.tokens import Tokenizer, TokenType
 
@@ -216,3 +216,28 @@ x"""
             repr(Tokenizer().tokenize("foo")),
             "[<Token token_type: TokenType.VAR, text: foo, line: 1, col: 3, start: 0, end: 2, comments: []>]",
         )
+
+    def test_numeric_literal_suffix(self):
+        tokenizer = Hive().tokenizer()
+
+        # A BD suffix on a leading zero is a decimal literal, not an identifier alias
+        self.assertEqual(
+            [(t.token_type, t.text, t.numeric_literal) for t in tokenizer.tokenize("0BD")],
+            [
+                (TokenType.NUMBER, "0", False),
+                (TokenType.DCOLON, "::", False),
+                (TokenType.DECIMAL, "BD", True),
+            ],
+        )
+        self.assertEqual(
+            [(t.token_type, t.text, t.numeric_literal) for t in tokenizer.tokenize("10.50BD")],
+            [
+                (TokenType.NUMBER, "10.50", False),
+                (TokenType.DCOLON, "::", False),
+                (TokenType.DECIMAL, "BD", True),
+            ],
+        )
+
+        # Tokens from explicit casts are not marked as numeric literals
+        self.assertFalse(tokenizer.tokenize("DECIMAL")[0].numeric_literal)
+

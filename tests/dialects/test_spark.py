@@ -1294,6 +1294,41 @@ TBLPROPERTIES (
             },
         )
 
+    def test_decimal_literal_suffix(self):
+        # BD is a decimal literal suffix, never an implicit alias
+        for dialect in ("spark", "spark2"):
+            self.assertEqual(
+                parse_one("SELECT 0BD", read=dialect).sql(dialect),
+                "SELECT 0BD",
+            )
+
+        self.validate_all(
+            "SELECT 10.50BD",
+            write={
+                "spark": "SELECT 10.50BD",
+                "spark2": "SELECT 10.50BD",
+                "hive": "SELECT CAST(10.50 AS DECIMAL(4, 2))",
+            },
+        )
+
+        # The exponent form is expanded in Spark 2, whose lexer rejects exponents on BD literals;
+        # the generated text round-trips with the same value, precision and scale
+        for dialect in ("spark", "spark2"):
+            generated = parse_one("SELECT 1E3BD", read=dialect).sql(dialect)
+            self.assertEqual(generated, "SELECT 1000BD")
+            reparsed = parse_one(generated, read=dialect).sql(dialect)
+            self.assertEqual(reparsed, generated)
+
+        self.assertEqual(
+            parse_one("SELECT 1E-2BD", read="spark2").sql("spark2"),
+            "SELECT 0.01BD",
+        )
+
+        # Explicit casts and plain numbers are untouched
+        self.validate_identity("SELECT CAST(10.50 AS DECIMAL)")
+        self.validate_identity("SELECT 10.50")
+        self.validate_identity("SELECT 0 AS BD")
+
     def test_explode_projection_to_unnest(self):
         self.validate_all(
             "SELECT EXPLODE(x) FROM tbl",
