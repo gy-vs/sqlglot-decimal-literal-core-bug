@@ -10,6 +10,38 @@ _CHAR_UPPER: dict[str, str] = {chr(i): chr(i).upper() for i in range(97, 123)}
 _DIGIT_CHARS: frozenset[str] = frozenset("0123456789")
 
 
+def _decimal_literal_precision_scale(text: str) -> tuple[int, int]:
+    """
+    Derives the (precision, scale) implied by a fixed-point or scientific decimal literal.
+
+    This mirrors how Hive/Spark infer the type of big-decimal literals: the precision is the
+    number of digits in the literal's unscaled value (trailing zeros preserved), and the
+    scale is the mantissa scale minus the exponent, clamped to 0. A positive exponent adds
+    trailing zeros to the precision.
+
+    Examples:
+        0      -> (1, 0)
+        10.50  -> (4, 2)
+        1E3    -> (4, 0)
+        1E-3   -> (1, 3)
+        1.5E-2 -> (2, 3)
+    """
+    mantissa, _, exponent_text = text.upper().partition("E")
+    integer, _, fraction = mantissa.partition(".")
+
+    digits = len((integer + fraction).lstrip("0")) or 1
+
+    exponent = int(exponent_text) if exponent_text else 0
+    scale = len(fraction) - exponent
+    if scale < 0:
+        precision = digits - scale
+        scale = 0
+    else:
+        precision = digits
+
+    return precision, scale
+
+
 class TokenType(IntEnum):
     L_PAREN = auto()
     R_PAREN = auto()
@@ -920,7 +952,11 @@ class TokenizerCore:
     def _scan_number(self) -> None:
         if self._char == "0":
             peek = _CHAR_UPPER.get(self._peek, self._peek)
-            if peek == "B":
+            # A leading 0 can still carry a numeric literal suffix (e.g. 0BD), which takes
+            # precedence over bit/hex string prefixes such as 0b/0x
+            if peek and self._match_numeric_literal_suffix(self._current):
+                return self._scan_numeric_literal_suffix()
+            elif peek == "B":
                 return self._scan_bits() if self.has_bit_strings else self._add(TokenType.NUMBER)
             elif peek == "X":
                 return self._scan_hex() if self.has_hex_strings else self._add(TokenType.NUMBER)
@@ -996,8 +1032,58 @@ class TokenizerCore:
 
         # Normalize inputs such as 123L to 123::BIGINT so that they're parsed as casts
         if numeric_type:
-            self._add(TokenType.DCOLON, "::")
-            self._add(numeric_type, numeric_literal)
+            self._add_numeric_literal_cast(number_text, numeric_literal, numeric_type)
+
+    def _match_numeric_literal_suffix(self, start: int) -> str | None:
+        """
+        Returns the upper-cased numeric literal suffix found immediately after the current
+        position (e.g. "BD" in `0BD`), or None. The suffix must span the entire remaining
+        identifier run, mirroring the generic number scan.
+        """
+        numeric_literals = self.numeric_literals
+        if not numeric_literals:
+            return None
+
+        size = self.size
+        sql = self.sql
+        single_tokens = self.single_tokens
+        end = start
+        while end < size and not sql[end].isspace() and sql[end] not in single_tokens:
+            end += 1
+
+        suffix = sql[start:end].upper()
+        return suffix if suffix in numeric_literals else None
+
+    def _scan_numeric_literal_suffix(self) -> None:
+        """Scans a leading 0 that carries a numeric literal suffix, e.g. 0BD."""
+        suffix = self._match_numeric_literal_suffix(self._current)
+        if not suffix:
+            return self._add(TokenType.NUMBER)
+
+        self._advance(len(suffix))
+
+        number_text = self.sql[self._start : self._current - len(suffix)]
+        numeric_type = self.keywords[self.numeric_literals[suffix]]
+
+        self._add(TokenType.NUMBER, number_text)
+        self._add_numeric_literal_cast(number_text, suffix, numeric_type)
+
+    def _add_numeric_literal_cast(
+        self, number_text: str, numeric_literal: str, numeric_type: TokenType
+    ) -> None:
+        """Adds the tokens that cast a number literal to its suffix type, e.g. `10.50::DECIMAL(4, 2)`."""
+        self._add(TokenType.DCOLON, "::")
+        self._add(numeric_type, numeric_literal)
+
+        if numeric_type == TokenType.DECIMAL:
+            # A decimal suffix (e.g. BD) implies a DECIMAL(p, s) whose precision and scale
+            # are derived from the literal text, so e.g. 10.50BD is cast to DECIMAL(4, 2)
+            precision, scale = _decimal_literal_precision_scale(number_text)
+            self._add(TokenType.L_PAREN, "(")
+            self._add(TokenType.NUMBER, str(precision))
+            self._add(TokenType.COMMA, ",")
+            self._add(TokenType.NUMBER, str(scale))
+            self._add(TokenType.R_PAREN, ")")
 
     def _scan_bits(self) -> None:
         self._advance()

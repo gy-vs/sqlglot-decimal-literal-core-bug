@@ -1208,6 +1208,29 @@ TBLPROPERTIES (
             },
         )
 
+    def test_decimal_literal_suffix(self):
+        # BD is a decimal literal suffix, never an alias
+        for dialect in ("spark", "spark2", "databricks"):
+            for sql, expected in (
+                ("SELECT 0BD", "SELECT CAST(0 AS DECIMAL(1, 0))"),
+                ("SELECT 10.50BD", "SELECT CAST(10.50 AS DECIMAL(4, 2))"),
+                ("SELECT 1E3BD", "SELECT CAST(1E3 AS DECIMAL(4, 0))"),
+                ("SELECT 1.0bd", "SELECT CAST(1.0 AS DECIMAL(2, 1))"),
+            ):
+                with self.subTest(dialect=dialect, sql=sql):
+                    expression = parse_one(sql, read=dialect)
+                    self.assertEqual(expression.sql(dialect=dialect), expected)
+                    # The generated SQL roundtrips through the same parser with the same type
+                    self.assertEqual(
+                        parse_one(expected, read=dialect).sql(dialect=dialect), expected
+                    )
+
+        # Explicit aliases, plain numbers and explicit casts are unaffected
+        self.validate_identity("SELECT 0 AS BD")
+        self.validate_identity("SELECT 0.50")
+        self.validate_identity("SELECT CAST(10.50 AS DECIMAL)")
+        self.validate_identity("SELECT CAST(10.50 AS DECIMAL(10, 4))")
+
     def test_bool_or(self):
         self.validate_all(
             "SELECT a, LOGICAL_OR(b) FROM table GROUP BY a",

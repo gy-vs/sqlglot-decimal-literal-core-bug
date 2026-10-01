@@ -1,6 +1,6 @@
 import unittest
 
-from sqlglot.dialects import BigQuery
+from sqlglot.dialects import BigQuery, Hive
 from sqlglot.errors import TokenError
 from sqlglot.tokens import Tokenizer, TokenType
 
@@ -215,4 +215,49 @@ x"""
         self.assertEqual(
             repr(Tokenizer().tokenize("foo")),
             "[<Token token_type: TokenType.VAR, text: foo, line: 1, col: 3, start: 0, end: 2, comments: []>]",
+        )
+
+    def test_numeric_literals(self):
+        tokenizer = Hive().tokenizer()
+
+        # A numeric literal suffix following a leading 0 is not parsed as an alias
+        self.assertEqual(
+            [(t.token_type, t.text) for t in tokenizer.tokenize("0BD")],
+            [
+                (TokenType.NUMBER, "0"),
+                (TokenType.DCOLON, "::"),
+                (TokenType.DECIMAL, "BD"),
+                (TokenType.L_PAREN, "("),
+                (TokenType.NUMBER, "1"),
+                (TokenType.COMMA, ","),
+                (TokenType.NUMBER, "0"),
+                (TokenType.R_PAREN, ")"),
+            ],
+        )
+
+        # Precision and scale are derived from fixed-point and scientific literals
+        for sql, number, precision, scale in (
+            ("10.50BD", "10.50", "4", "2"),
+            ("1E3BD", "1E3", "4", "0"),
+            ("1.5E-2bd", "1.5E-2", "2", "3"),
+            ("0bd", "0", "1", "0"),
+        ):
+            tokens = tokenizer.tokenize(sql)
+            self.assertEqual(tokens[0].token_type, TokenType.NUMBER)
+            self.assertEqual(tokens[0].text, number)
+            self.assertEqual(
+                [t.text for t in tokens if t.token_type == TokenType.NUMBER][1:],
+                [precision, scale],
+            )
+
+        # A space still separates the number from an alias
+        self.assertEqual(
+            [(t.token_type, t.text) for t in tokenizer.tokenize("0 BD")],
+            [(TokenType.NUMBER, "0"), (TokenType.VAR, "BD")],
+        )
+
+        # An unknown suffix starting after a 0 is not treated as a numeric literal
+        self.assertEqual(
+            [(t.token_type, t.text) for t in tokenizer.tokenize("0BDBD")],
+            [(TokenType.NUMBER, "0"), (TokenType.VAR, "BDBD")],
         )
